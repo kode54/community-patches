@@ -215,10 +215,10 @@ index 7003bd5ae..9bf03c7fa 100644
  .. only::  subproject and html
  
 diff --git a/MAINTAINERS b/MAINTAINERS
-index d3e847f7f..cff1b8a19 100644
+index bfc1b86e3..86ed91b72 100644
 --- a/MAINTAINERS
 +++ b/MAINTAINERS
-@@ -7334,7 +7334,7 @@ F:	Documentation/locking/*futex*
+@@ -7332,7 +7332,7 @@ F:	Documentation/locking/*futex*
  F:	include/asm-generic/futex.h
  F:	include/linux/futex.h
  F:	include/uapi/linux/futex.h
@@ -307,7 +307,7 @@ index 6442d97d9..886fe11cc 100644
  	inode->i_op = &empty_iops;
  	inode->i_fop = &no_open_fops;
 diff --git a/include/linux/compat.h b/include/linux/compat.h
-index 6e65be753..7d17ae0dc 100644
+index 6e65be753..d4c1b402b 100644
 --- a/include/linux/compat.h
 +++ b/include/linux/compat.h
 @@ -365,6 +365,17 @@ struct compat_robust_list_head {
@@ -334,7 +334,7 @@ index 6e65be753..7d17ae0dc 100644
  
 +/* kernel/futex2.c */
 +asmlinkage long compat_sys_futex_waitv(struct compat_futex_waitv *waiters,
-+				       compat_uint_t nr_futexes, compat_uint_t flags
++				       compat_uint_t nr_futexes, compat_uint_t flags,
 +				       struct __kernel_timespec __user *timo);
 +
 +asmlinkage long compat_sys_futex_requeue(struct compat_futex_requeue *uaddr1,
@@ -360,7 +360,7 @@ index fd47deea7..516bda982 100644
  	atomic_t		i_dio_count;
  	atomic_t		i_writecount;
 diff --git a/include/linux/syscalls.h b/include/linux/syscalls.h
-index 7688bc983..38c2fc50a 100644
+index 7688bc983..06823bc7e 100644
 --- a/include/linux/syscalls.h
 +++ b/include/linux/syscalls.h
 @@ -68,6 +68,8 @@ union bpf_attr;
@@ -393,17 +393,8 @@ index 7688bc983..38c2fc50a 100644
  /* kernel/hrtimer.c */
  asmlinkage long sys_nanosleep(struct __kernel_timespec __user *rqtp,
  			      struct __kernel_timespec __user *rmtp);
-@@ -1296,6 +1312,8 @@ int ksys_ipc(unsigned int call, int first, unsigned long second,
- 	unsigned long third, void __user * ptr, long fifth);
- int compat_ksys_ipc(u32 call, int first, int second,
- 	u32 third, u32 ptr, u32 fifth);
-+long ksys_futex_wake(void __user *uaddr, unsigned long nr_wake,
-+		     unsigned int flags);
- 
- /*
-  * The following kernel syscall equivalents are just wrappers to fs-internal
 diff --git a/include/uapi/asm-generic/unistd.h b/include/uapi/asm-generic/unistd.h
-index 728752917..9afde54cd 100644
+index 728752917..095c10a83 100644
 --- a/include/uapi/asm-generic/unistd.h
 +++ b/include/uapi/asm-generic/unistd.h
 @@ -862,8 +862,20 @@ __SYSCALL(__NR_process_madvise, sys_process_madvise)
@@ -420,7 +411,7 @@ index 728752917..9afde54cd 100644
 +__SC_COMP(__NR_futex_waitv, sys_futex_waitv, compat_sys_futex_waitv)
 +
 +#define __NR_futex_requeue 445
-+__SYSCALL(__NR_futex_requeue, sys_futex_requeue, compat_sys_futex_requeue)
++__SC_COMP(__NR_futex_requeue, sys_futex_requeue, compat_sys_futex_requeue)
 +
  #undef __NR_syscalls
 -#define __NR_syscalls 442
@@ -496,10 +487,10 @@ index a89eb0acc..9fbdaaf4f 100644
   * Support for robust futexes: the kernel cleans up held futexes at
   * thread exit time.
 diff --git a/init/Kconfig b/init/Kconfig
-index b77c60f8b..00182625d 100644
+index 29ad68325..c3e62e1b1 100644
 --- a/init/Kconfig
 +++ b/init/Kconfig
-@@ -1532,6 +1532,13 @@ config FUTEX
+@@ -1531,6 +1531,13 @@ config FUTEX
  	  support for "fast userspace mutexes".  The resulting kernel may not
  	  run glibc-based applications correctly.
  
@@ -525,25 +516,12 @@ index aa7368c7e..afbe15e51 100644
  obj-$(CONFIG_GENERIC_ISA_DMA) += dma.o
  obj-$(CONFIG_SMP) += smp.o
  ifneq ($(CONFIG_SMP),y)
-diff --git a/kernel/fork.c b/kernel/fork.c
-index d66cd1014..e39846a73 100644
---- a/kernel/fork.c
-+++ b/kernel/fork.c
-@@ -1308,6 +1308,8 @@ static void mm_release(struct task_struct *tsk, struct mm_struct *mm)
- 			put_user(0, tsk->clear_child_tid);
- 			do_futex(tsk->clear_child_tid, FUTEX_WAKE,
- 					1, NULL, NULL, 0, 0);
-+			ksys_futex_wake(tsk->clear_child_tid, 1,
-+					FUTEX_32 | FUTEX_SHARED_FLAG);
- 		}
- 		tsk->clear_child_tid = NULL;
- 	}
 diff --git a/kernel/futex2.c b/kernel/futex2.c
 new file mode 100644
-index 000000000..7cf6d5ba6
+index 000000000..1eb20410d
 --- /dev/null
 +++ b/kernel/futex2.c
-@@ -0,0 +1,1294 @@
+@@ -0,0 +1,1291 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +/*
 + * futex2 system call interface by André Almeida <andrealmeid@collabora.com>
@@ -1062,8 +1040,11 @@ index 000000000..7cf6d5ba6
 +			struct futex_bucket *tmp =
 +				futex_get_bucket((void *)uaddr,
 +						 &futexv->objects[i].key, true);
-+			if (IS_ERR(tmp))
++			if (IS_ERR(tmp)) {
++				__set_current_state(TASK_RUNNING);
++				futex_dequeue_multiple(futexv, i);
 +				return PTR_ERR(tmp);
++			}
 +			futexv->objects[i].bucket = tmp;
 +		}
 +
@@ -1485,8 +1466,18 @@ index 000000000..7cf6d5ba6
 +		key1.offset == key2.offset);
 +}
 +
-+long ksys_futex_wake(void __user *uaddr, unsigned long nr_wake,
-+		     unsigned int flags)
++/**
++ * sys_futex_wake - Wake a number of futexes waiting on an address
++ * @uaddr:   Address of futex to be woken up
++ * @nr_wake: Number of futexes waiting in uaddr to be woken up
++ * @flags:   Flags for size and shared
++ *
++ * Wake `nr_wake` threads waiting at uaddr.
++ *
++ * Returns the number of woken threads on success, error code otherwise.
++ */
++SYSCALL_DEFINE3(futex_wake, void __user *, uaddr, unsigned int, nr_wake,
++		unsigned int, flags)
 +{
 +	bool shared = (flags & FUTEX_SHARED_FLAG) ? true : false;
 +	unsigned int size = flags & FUTEX_SIZE_MASK;
@@ -1521,22 +1512,6 @@ index 000000000..7cf6d5ba6
 +	wake_up_q(&wake_q);
 +
 +	return ret;
-+}
-+
-+/**
-+ * sys_futex_wake - Wake a number of futexes waiting on an address
-+ * @uaddr:   Address of futex to be woken up
-+ * @nr_wake: Number of futexes waiting in uaddr to be woken up
-+ * @flags:   Flags for size and shared
-+ *
-+ * Wake `nr_wake` threads waiting at uaddr.
-+ *
-+ * Returns the number of woken threads on success, error code otherwise.
-+ */
-+SYSCALL_DEFINE3(futex_wake, void __user *, uaddr, unsigned int, nr_wake,
-+		unsigned int, flags)
-+{
-+	return ksys_futex_wake(uaddr, nr_wake, flags);
 +}
 +
 +static void futex_double_unlock(struct futex_bucket *b1, struct futex_bucket *b2)
@@ -1876,7 +1851,7 @@ index 4205ed415..cf5ad4ea1 100644
 +# define __NR_futex_requeue 445
 +#endif
 diff --git a/tools/include/uapi/asm-generic/unistd.h b/tools/include/uapi/asm-generic/unistd.h
-index 728752917..f9ff2bff5 100644
+index 728752917..23febe59e 100644
 --- a/tools/include/uapi/asm-generic/unistd.h
 +++ b/tools/include/uapi/asm-generic/unistd.h
 @@ -862,8 +862,17 @@ __SYSCALL(__NR_process_madvise, sys_process_madvise)
